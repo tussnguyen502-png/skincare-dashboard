@@ -14,6 +14,8 @@ Dat thu muc DW_SCHEMA_VI canh app.py (hoac dat bien DW_DIR).
 """
 
 import os
+import re
+import unicodedata
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -240,6 +242,217 @@ def barh(labels,values,color,money=True):
     if len(values): fig.update_xaxes(range=[0,max(values)*1.18])
     return fig
 
+# ── Trợ lý hỏi-đáp dữ liệu (rule-based, không dùng LLM ngoài) ────────────
+def _norm(s):
+    """Bo dau, ha chu, dung de so khop tu khoa khong phan biet dau/hoa-thuong."""
+    s = s.lower().strip()
+    s = s.replace('đ', 'd').replace('Đ', 'D')
+    s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    return s
+
+MONTH_NAMES_NORM = {
+    "thang 1": 1, "thang 01": 1, "t1": 1, "thang mot": 1,
+    "thang 2": 2, "thang 02": 2, "t2": 2, "thang hai": 2,
+    "thang 3": 3, "thang 03": 3, "t3": 3, "thang ba": 3,
+    "thang 4": 4, "thang 04": 4, "t4": 4, "thang tu": 4,
+    "thang 5": 5, "thang 05": 5, "t5": 5, "thang nam": 5,
+    "thang 6": 6, "thang 06": 6, "t6": 6, "thang sau": 6,
+    "thang 7": 7, "thang 07": 7, "t7": 7, "thang bay": 7,
+    "thang 8": 8, "thang 08": 8, "t8": 8, "thang tam": 8,
+    "thang 9": 9, "thang 09": 9, "t9": 9, "thang chin": 9,
+    "thang 10": 10, "t10": 10, "thang muoi": 10,
+    "thang 11": 11, "t11": 11, "thang muoi mot": 11,
+    "thang 12": 12, "t12": 12, "thang muoi hai": 12,
+}
+
+def extract_time_filter(qn, tx_max_date):
+    """
+    qn: cau hoi da _norm().
+    Tra ve (mask_desc, filter_fn) trong do filter_fn(df) -> df da loc theo thoi gian.
+    Neu khong tim thay tin hieu thoi gian -> tra ve toan bo (khong loc).
+    """
+    # nam YYYY
+    year_match = re.search(r"\bnam\s*(20\d{2})\b", qn)
+    year = int(year_match.group(1)) if year_match else None
+
+    # thang N [nam YYYY]
+    month = None
+    m2 = re.search(r"\bthang\s*(1[0-2]|0?[1-9])\b", qn)
+    if m2:
+        month = int(m2.group(1))
+    else:
+        for k, v in MONTH_NAMES_NORM.items():
+            if k in qn:
+                month = v
+                break
+
+    # quy N
+    quarter = None
+    m3 = re.search(r"\bquy\s*([1-4])\b", qn)
+    if m3:
+        quarter = int(m3.group(1))
+
+    # tuong doi: thang nay / thang truoc / quy nay / nam nay / nam ngoai / gan day nhat
+    rel = None
+    if "thang truoc" in qn or "thang vua roi" in qn:
+        rel = "last_month"
+    elif "thang nay" in qn or "thang hien tai" in qn:
+        rel = "this_month"
+    elif "nam ngoai" in qn:
+        rel = "last_year"
+    elif "nam nay" in qn:
+        rel = "this_year"
+    elif "gan day nhat" in qn or "gan nhat" in qn:
+        rel = "last_month"
+
+    if rel == "last_month":
+        ref = tx_max_date.replace(day=1) - pd.Timedelta(days=1)
+        month, year = ref.month, ref.year
+    elif rel == "this_month":
+        month, year = tx_max_date.month, tx_max_date.year
+    elif rel == "last_year":
+        year = tx_max_date.year - 1
+    elif rel == "this_year":
+        year = tx_max_date.year
+
+    parts = []
+    def filt(df):
+        out = df
+        if year is not None:
+            out = out[out["nam"] == year]
+        if quarter is not None:
+            out = out[out["quy"] == quarter]
+        if month is not None:
+            out = out[out["thang"] == month]
+        return out
+
+    if month is not None: parts.append(f"tháng {month}")
+    if quarter is not None: parts.append(f"quý {quarter}")
+    if year is not None: parts.append(f"năm {year}")
+    desc = " ".join(parts) if parts else "toàn bộ khoảng thời gian đang lọc"
+    return desc, filt, (month is not None or quarter is not None or year is not None)
+
+
+def find_entity(qn, names, prefix_words=()):
+    """Tim ten thuc the (danh muc/thuong hieu/kenh...) xuat hien trong cau hoi."""
+    for name in sorted(names, key=len, reverse=True):
+        if _norm(name) in qn:
+            return name
+    return None
+
+
+def answer_question(question, TX, RFM):
+    """
+    Tra ve (answer_html, detail_dataframe_or_None, explain_markdown).
+    """
+    qn = _norm(question)
+    if not qn:
+        return "Bạn chưa nhập câu hỏi.", None, ""
+
+    tx_max_date = TX["ngay"].max()
+    time_desc, time_filter, has_time = extract_time_filter(qn, tx_max_date)
+
+    cats = TX["ten_danh_muc"].dropna().unique().tolist()
+    brands = TX["ten_thuong_hieu"].dropna().unique().tolist()
+    channels = TX["ten_kenh_tiep_thi"].dropna().unique().tolist()
+    products = TX["ten_san_pham"].dropna().unique().tolist()
+
+    cat_hit = find_entity(qn, cats)
+    brand_hit = find_entity(qn, brands)
+    chan_hit = find_entity(qn, channels)
+
+    df = time_filter(TX)
+    entity_desc = []
+    if cat_hit:
+        df = df[df["ten_danh_muc"] == cat_hit]; entity_desc.append(f"danh mục **{cat_hit}**")
+    if brand_hit:
+        df = df[df["ten_thuong_hieu"] == brand_hit]; entity_desc.append(f"thương hiệu **{brand_hit}**")
+    if chan_hit:
+        df = df[df["ten_kenh_tiep_thi"] == chan_hit]; entity_desc.append(f"kênh **{chan_hit}**")
+    entity_str = (" ở " + ", ".join(entity_desc)) if entity_desc else ""
+
+    explain = (f"- Thời gian nhận diện: **{time_desc}**\n"
+               f"- Hạng mục nhận diện: {', '.join(entity_desc) if entity_desc else '(không có, tính toàn bộ)'}\n"
+               f"- Số dòng dữ liệu khớp: **{iint(len(df))}**")
+
+    if df.empty and (has_time or entity_desc):
+        return (f"Không tìm thấy giao dịch nào khớp với {time_desc}{entity_str}. "
+                f"Thử câu hỏi khác hoặc kiểm tra lại mốc thời gian."), None, explain
+
+    # ---------- TOP N queries ----------
+    is_top = ("nhat" in qn and any(k in qn for k in ["nhieu", "cao", "ban chay", "top"])) or "top" in qn
+    if is_top and ("san pham" in qn):
+        s = df.groupby("ten_san_pham")["doanh_thu"].sum().sort_values(ascending=False)
+        if s.empty: return "Không có dữ liệu sản phẩm phù hợp.", None, explain
+        top5 = s.head(5).reset_index(); top5.columns = ["Sản phẩm", "Doanh thu"]
+        top5["Doanh thu"] = top5["Doanh thu"].map(vnd)
+        ans = f"Sản phẩm bán chạy nhất{entity_str} theo {time_desc} là <b>{s.index[0]}</b> với doanh thu {vnd(s.iloc[0])}."
+        return ans, top5, explain
+
+    if is_top and ("thuong hieu" in qn):
+        s = df.groupby("ten_thuong_hieu")["doanh_thu"].sum().sort_values(ascending=False)
+        if s.empty: return "Không có dữ liệu thương hiệu phù hợp.", None, explain
+        top5 = s.head(5).reset_index(); top5.columns = ["Thương hiệu", "Doanh thu"]
+        top5["Doanh thu"] = top5["Doanh thu"].map(vnd)
+        ans = f"Thương hiệu doanh thu cao nhất theo {time_desc} là <b>{s.index[0]}</b> với {vnd(s.iloc[0])}."
+        return ans, top5, explain
+
+    if is_top and ("danh muc" in qn):
+        s = df.groupby("ten_danh_muc")["doanh_thu"].sum().sort_values(ascending=False)
+        if s.empty: return "Không có dữ liệu danh mục phù hợp.", None, explain
+        top5 = s.head(5).reset_index(); top5.columns = ["Danh mục", "Doanh thu"]
+        top5["Doanh thu"] = top5["Doanh thu"].map(vnd)
+        ans = f"Danh mục bán chạy nhất theo {time_desc} là <b>{s.index[0]}</b> với {vnd(s.iloc[0])}."
+        return ans, top5, explain
+
+    if is_top and ("kenh" in qn):
+        s = df.groupby("ten_kenh_tiep_thi")["ma_giao_dich"].nunique().sort_values(ascending=False)
+        if s.empty: return "Không có dữ liệu kênh phù hợp.", None, explain
+        top5 = s.head(5).reset_index(); top5.columns = ["Kênh", "Số đơn"]
+        ans = f"Kênh mang về nhiều đơn nhất theo {time_desc} là <b>{s.index[0]}</b> với {iint(s.iloc[0])} đơn."
+        return ans, top5, explain
+
+    if is_top and ("khach hang" in qn or "khach" in qn):
+        s = df.groupby("ma_khach_hang")["doanh_thu"].sum().sort_values(ascending=False)
+        if s.empty: return "Không có dữ liệu khách hàng phù hợp.", None, explain
+        top5 = s.head(5).reset_index(); top5.columns = ["Mã khách hàng", "Tổng chi tiêu"]
+        top5["Tổng chi tiêu"] = top5["Tổng chi tiêu"].map(vnd)
+        ans = f"Khách hàng chi tiêu nhiều nhất theo {time_desc} là <b>{s.index[0]}</b> với {vnd(s.iloc[0])}."
+        return ans, top5, explain
+
+    # ---------- Metric-specific queries ----------
+    wants_revenue = any(k in qn for k in ["doanh thu", "ban duoc bao nhieu tien", "thu duoc bao nhieu"])
+    wants_orders = any(k in qn for k in ["don hang", "so don", "bao nhieu don"])
+    wants_customers = any(k in qn for k in ["khach hang", "bao nhieu khach"]) and not is_top
+    wants_aov = "aov" in qn or "gia tri don hang" in qn or "gia tri trung binh" in qn
+
+    if wants_aov:
+        orders = df["ma_giao_dich"].nunique()
+        aov = df["doanh_thu"].sum() / orders if orders else 0
+        ans = f"AOV (giá trị đơn hàng trung bình){entity_str} theo {time_desc} là <b>{vnd(aov)}</b> (trên {iint(orders)} đơn)."
+        return ans, None, explain
+
+    if wants_orders:
+        orders = df["ma_giao_dich"].nunique()
+        ans = f"Số đơn hàng{entity_str} theo {time_desc} là <b>{iint(orders)} đơn</b>."
+        return ans, None, explain
+
+    if wants_customers:
+        custs = df["ma_khach_hang"].nunique()
+        ans = f"Số khách hàng{entity_str} theo {time_desc} là <b>{iint(custs)} khách</b>."
+        return ans, None, explain
+
+    if wants_revenue or ((has_time or entity_desc) and not (wants_orders or wants_customers or wants_aov)):
+        # default to revenue only when there's a clear data-question signal
+        # (explicit "doanh thu" keyword, or a time/entity filter was recognized)
+        rev = df["doanh_thu"].sum()
+        ans = f"Doanh thu{entity_str} theo {time_desc} là <b>{vnd(rev)}</b> (VNĐ)."
+        return ans, None, explain
+
+    return ("Mình chưa hiểu rõ câu hỏi này. Hãy thử hỏi về doanh thu, đơn hàng, khách hàng, AOV, "
+            "hoặc \"top sản phẩm/thương hiệu/danh mục/kênh\" theo tháng/quý/năm cụ thể."), None, explain
+
+
 
 # ── Sidebar: brand + slicer (dong bo toan bao cao) ───────────────────────
 SIDE_IMG="https://images.pexels.com/photos/34939728/pexels-photo-34939728.jpeg?auto=compress&cs=tinysrgb&w=600"
@@ -256,10 +469,12 @@ SHOW_DL=st.sidebar.toggle("Nút tải dữ liệu (.csv)",value=True,
 st.sidebar.caption("💡 Ô vàng “Đọc nhanh” dưới mỗi biểu đồ là nhận xét tự động tính từ đúng dữ liệu đang lọc.")
 
 PAGES=["1 · Tổng quan Kinh doanh","2 · Hành vi Khách hàng","3 · Phân khúc Khách hàng RFM",
-       "4 · Phân tích Giữ chân Khách hàng","5 · Phát hiện Bất thường","6 · Dự báo & Khuyến nghị"]
-NAV=["Tổng quan","Hành vi KH","Phân khúc RFM","Giữ chân","Bất thường","Dự báo & Đề xuất"]
+       "4 · Phân tích Giữ chân Khách hàng","5 · Phát hiện Bất thường","6 · Dự báo & Khuyến nghị",
+       "7 · Hỏi & Đáp Dữ liệu"]
+NAV=["Tổng quan","Hành vi KH","Phân khúc RFM","Giữ chân","Bất thường","Dự báo & Đề xuất","Hỏi & Đáp"]
 PAGE_TAGS=["Executive Overview · Descriptive","Customer Behavior · Descriptive","RFM Customer Segmentation · Diagnostic",
-           "Cohort & Retention Analysis · Diagnostic","Anomaly Detection · Diagnostic","Predictive & Recommendation"]
+           "Cohort & Retention Analysis · Diagnostic","Anomaly Detection · Diagnostic","Predictive & Recommendation",
+           "Rule-based Q&A · Assistant"]
 HERO_IMG={
  0:("https://images.pexels.com/photos/34939732/pexels-photo-34939732.jpeg?auto=compress&cs=tinysrgb&w=1400","Bức tranh kinh doanh toàn cảnh"),
  1:("https://images.pexels.com/photos/34939704/pexels-photo-34939704.jpeg?auto=compress&cs=tinysrgb&w=1400","Từng thói quen mua sắm kể một câu chuyện"),
@@ -267,6 +482,7 @@ HERO_IMG={
  3:("https://images.pexels.com/photos/34939731/pexels-photo-34939731.jpeg?auto=compress&cs=tinysrgb&w=1400","Giữ chân khách như giữ một thói quen chăm da"),
  4:("https://images.pexels.com/photos/34939730/pexels-photo-34939730.jpeg?auto=compress&cs=tinysrgb&w=1400","Soi kỹ từng giao dịch lạ"),
  5:("https://images.pexels.com/photos/34939691/pexels-photo-34939691.jpeg?auto=compress&cs=tinysrgb&w=1400","Nhìn trước một bước, chăm sóc đúng người"),
+ 6:("https://images.pexels.com/photos/34939704/pexels-photo-34939704.jpeg?auto=compress&cs=tinysrgb&w=1400","Hỏi một câu, ra ngay con số"),
 }
 
 st.sidebar.markdown("<div class='slicer-group'>Bộ lọc đồng bộ (toàn báo cáo)</div>", unsafe_allow_html=True)
@@ -310,7 +526,7 @@ st.markdown(f"""<div class='report-hero'>
 </div>""", unsafe_allow_html=True)
 
 if "pidx" not in st.session_state: st.session_state.pidx=0
-ncols=st.columns(6)
+ncols=st.columns(7)
 for i,lbl in enumerate(NAV):
     if ncols[i].button(lbl,key=f"nav{i}",use_container_width=True,
                        type=("primary" if st.session_state.pidx==i else "secondary")):
@@ -1133,5 +1349,46 @@ Các tỷ lệ 15–20% là mức thận trọng thường thấy của chiến 
             b.download_button("Tải bảng Action Plan (.csv)",_ap.to_csv(index=False).encode("utf-8-sig"),
                 "06_action_plan.csv","text/csv",key=f"dl{_DL[0]}")
 
+# ═══ DASHBOARD 7 — HOI & DAP DU LIEU (rule-based, khong LLM) ═════════════
+elif page==PAGES[6]:
+    st.title("Hỏi & Đáp Dữ liệu"); st.caption(PAGE_TAGS[6]); hero(*HERO_IMG[6])
+    st.markdown("<div class='read'>Gõ câu hỏi bằng tiếng Việt về doanh thu, đơn hàng, khách hàng, sản phẩm, "
+                "thương hiệu, danh mục hoặc kênh — trợ lý sẽ tự tính từ đúng dữ liệu.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='note'><b>Cách hoạt động:</b> Đây <u>không phải</u> mô hình ngôn ngữ lớn (LLM/ChatGPT). "
+                "Trợ lý chỉ nhận diện từ khoá thời gian (tháng/quý/năm), chỉ số (doanh thu/đơn/khách/AOV) và hạng mục "
+                "(danh mục/thương hiệu/kênh) xuất hiện trong câu hỏi, rồi chạy trực tiếp bằng pandas trên "
+                "<code>fact_transaction</code> — minh bạch 100%, không có rủi ro trả lời sai do ảo giác (hallucination) "
+                "như LLM.</div>", unsafe_allow_html=True)
+
+    examples = [
+        "Doanh thu tháng 6 năm 2024?", "Có bao nhiêu đơn hàng trong quý 1?",
+        "Sản phẩm nào bán chạy nhất?", "Thương hiệu nào doanh thu cao nhất?",
+        "AOV tháng trước là bao nhiêu?", "Khách hàng nào chi tiêu nhiều nhất?",
+        "Doanh thu danh mục Serum?", "Kênh nào mang về nhiều đơn nhất?",
+    ]
+    st.markdown("<div class='card-sub' style='margin-bottom:4px'>Câu hỏi mẫu (bấm để dùng thử):</div>", unsafe_allow_html=True)
+    def _set_qa_box(text): st.session_state.qa_box = text
+    ecols = st.columns(4)
+    for i, ex in enumerate(examples):
+        ecols[i % 4].button(ex, key=f"qaex{i}", use_container_width=True, on_click=_set_qa_box, args=(ex,))
+
+    q = st.text_input("Câu hỏi của bạn",
+                       placeholder="VD: Doanh thu tháng 3 năm 2024 là bao nhiêu?", key="qa_box")
+
+    if q:
+        ans, detail_df, explain_md = answer_question(q, TX, RFM)
+        b = card("Câu trả lời", tip="Trả lời được tính trực tiếp từ dữ liệu thật bằng pandas, không phải AI sinh văn bản.")
+        b.markdown(f"<div class='insight'><span class='lbl'>Trả lời</span>{ans}</div>", unsafe_allow_html=True)
+        if detail_df is not None:
+            b.dataframe(detail_df, width="stretch", hide_index=True)
+        if EXPLAIN:
+            with b.expander("Trợ lý đã hiểu câu hỏi này như thế nào?"):
+                st.markdown(explain_md)
+        b.markdown("<div class='foot'>Lưu ý: trợ lý chỉ nhận diện từ khoá — câu hỏi càng gần với mẫu câu tiếng Việt "
+                    "thông thường (có tháng/quý/năm/chỉ số rõ ràng) thì càng trả lời chính xác. Câu hỏi ngoài phạm vi "
+                    "dữ liệu (thời tiết, trò chuyện...) sẽ được từ chối thay vì đoán bừa.</div>", unsafe_allow_html=True)
+    else:
+        st.info("👆 Bấm một câu hỏi mẫu ở trên, hoặc tự gõ câu hỏi của bạn vào ô rồi nhấn Enter.")
+
 st.markdown(f"<div style='color:{MUTED};font-size:12px;margin-top:20px;border-top:1px solid {LINE};padding-top:12px'>"
-            "SKINCARE ANALYTICS · 6 Dashboard · DW_SCHEMA_VI · Streamlit + Plotly + scikit-learn · Soft Feminine + Luxury</div>", unsafe_allow_html=True)
+            "SKINCARE ANALYTICS · 7 Dashboard · DW_SCHEMA_VI · Streamlit + Plotly + scikit-learn · Soft Feminine + Luxury</div>", unsafe_allow_html=True)
