@@ -1,8 +1,8 @@
 ma_thuong_hieu,ten_thuong_hieu,phan_cap_thuong_hieu
 1,Anessa,mid_range
-2,Beauty of Joseon VN,local_vn
+2,Beauty of Joseon VN,mid_range
 3,Bioderma,mid_range
-4,CeraVe,premium
+4,CeraVe,mid_range
 5,Cetaphil,mid_range
 6,Clean & Clear,budget
 7,Cocoon,local_vn
@@ -12,24 +12,24 @@ ma_thuong_hieu,ten_thuong_hieu,phan_cap_thuong_hieu
 11,Hada Labo,mid_range
 12,Hasaki,local_vn
 13,Innisfree,mid_range
-14,Kiehl's VN,local_vn
+14,Kiehl's VN,premium
 15,Klairs,mid_range
 16,L'Oreal,budget
-17,La Roche-Posay,premium
+17,La Roche-Posay,mid_range
 18,Laneige,premium
-19,Murad VN,local_vn
+19,Murad VN,premium
 20,Neutrogena,mid_range
-21,Ohui VN,local_vn
-22,Paula's Choice,premium
+21,Ohui VN,premium
+22,Paula's Choice,mid_range
 23,Pond's,budget
 24,Rovectin,mid_range
 25,SK-II,premium
 26,Senka,budget
-27,Shiseido VN,local_vn
+27,Shiseido VN,premium
 28,Simple,budget
 29,Some By Mi,mid_range
 30,St. Ives,budget
 31,Sulwhasoo,premium
 32,The Face Shop,mid_range
-33,The Ordinary,premium
+33,The Ordinary,mid_range
 34,Vaseline,budget
